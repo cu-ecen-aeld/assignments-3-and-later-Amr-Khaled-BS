@@ -12,6 +12,7 @@
 # greeting=hello or greeting=#2 -> ${greeting}
 # files: find . -name a_dir
 # content: grep -r "AMR" *
+# comment 
 
 if [ $# -ne 2 ]; then
     echo "enter 2 arguments (filesdir, searchstr)"
