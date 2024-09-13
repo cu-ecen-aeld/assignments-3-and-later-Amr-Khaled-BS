@@ -71,10 +71,13 @@ bool do_exec(int count, ...)
         return false;
     }
     else if (pid==0) {
-        if( execv(command[0], command) ){
-            return false;
-        }
-        waitpid(pid, &status, WNOHANG);
+        execv(command[0], command);
+        exit(EXIT_FAILURE);
+        return false;
+    }
+
+    if (waitpid(pid, &status, 0) != -1) {
+        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
 
     va_end(args);
@@ -110,31 +113,30 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
-    int kidpid;
     int fd = open(outputfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
     if (fd < 0)
     {
         perror("open");
         return false;
     }
-    switch (kidpid = fork())
-    {
-    case -1:
-        perror("fork");
+
+    int status;
+    pid_t kidpid = fork ();
+    if (kidpid<0) {
         return false;
-    case 0:
+    }
+    else if (kidpid==0) {
         if (dup2(fd, 1) < 0)
         {
-            perror("dup2");
             return false;
         }
-        close(fd);
         execv(command[0], command);
-        // perror("execvp");
-        // return false;
-    default:
-        close(fd);
-        /* do whatever the parent wants to do. */
+        exit(EXIT_FAILURE);
+        return false;
+    }
+
+    if (waitpid(kidpid, &status, 0) != -1) {
+        return (WEXITSTATUS(status) == 0);
     }
 
     va_end(args);
