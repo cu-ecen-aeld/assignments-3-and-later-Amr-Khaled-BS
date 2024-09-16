@@ -5,6 +5,8 @@
 set -e
 set -u
 
+CALLING_DIR=$(pwd)
+# echo $(pwd)
 OUTDIR=/tmp/aeld
 KERNEL_REPO=git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
 KERNEL_VERSION=v5.15.163
@@ -84,7 +86,7 @@ fi
 
 # TODO: Make and install busybox
 make CONFIG_PREFIX=${OUTDIR}/rootfs ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
-cd ../rootfs
+cd ${OUTDIR}/rootfs
 
 echo "Library dependencies"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
@@ -92,28 +94,37 @@ ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
 # find /home/amr/installations/ -name "libm.so.6"
-cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib64
-cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib
-cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64
-cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64
-cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64
+# cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib64
+# cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib
+# cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64
+# cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64
+# cp /home/amr/installations/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64
+SYSROOT=`${CROSS_COMPILE}gcc -print-sysroot`
+cp -a ${SYSROOT}/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib/
+cp -a ${SYSROOT}/lib64/* ${OUTDIR}/rootfs/lib64/
 
 # TODO: Make device nodes
 sudo mknod -m 666 dev/null c 1 3
 sudo mknod -m 666 dev/console c 5 1
 
 # TODO: Clean and build the writer utility
-cd ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app
+# cd ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app
+cd ${CALLING_DIR}
 make clean
 make CROSS_COMPILE=${CROSS_COMPILE}gcc
 
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
-cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/writer ${OUTDIR}/rootfs/home
-cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/finder.sh ${OUTDIR}/rootfs/home
-cp -r ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/conf/ ${OUTDIR}/rootfs/home/
-cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/finder-test.sh ${OUTDIR}/rootfs/home
-cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/autorun-qemu.sh ${OUTDIR}/rootfs/home
+# cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/writer ${OUTDIR}/rootfs/home
+# cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/finder.sh ${OUTDIR}/rootfs/home
+# cp -r ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/conf/ ${OUTDIR}/rootfs/home/
+# cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/finder-test.sh ${OUTDIR}/rootfs/home
+# cp ~/projects/coursera_emb_linux/assignments/assignment-1-Amr-Khaled-BS/finder-app/autorun-qemu.sh ${OUTDIR}/rootfs/home
+cp writer ${OUTDIR}/rootfs/home/
+cp finder.sh ${OUTDIR}/rootfs/home
+cp finder-test.sh ${OUTDIR}/rootfs/home
+cp -r conf/ ${OUTDIR}/rootfs/home/
+cp autorun-qemu.sh ${OUTDIR}/rootfs/home
 
 # TODO: Chown the root directory
 cd ${OUTDIR}/rootfs
