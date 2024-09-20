@@ -7,8 +7,8 @@ set -u
 
 NUMFILES=10
 WRITESTR=AELD_IS_FUN
-# WRITEDIR=/tmp/aeld-data
-WRITEDIR=/tmp/assignment4-result.txt
+WRITEDIR=/tmp/aeld-data
+# WRITEDIR=/tmp/assignment4-result.txt
 username=$(cat /etc/finder-app/conf/username.txt)
 writerapp=/usr/bin/writer
 finderapp=/usr/bin/finder.sh
@@ -68,6 +68,7 @@ OUTPUTSTRING=$(${finderapp} "$WRITEDIR" "$WRITESTR")
 rm -rf /tmp/aeld-data
 
 set +e
+echo ${OUTPUTSTRING} | grep "${MATCHSTR}" > /tmp/assignment4-result.txt
 echo ${OUTPUTSTRING} | grep "${MATCHSTR}"
 if [ $? -eq 0 ]; then
 	echo "success"
