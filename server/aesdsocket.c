@@ -1,178 +1,158 @@
 #include "stdio.h"
 #include "stdlib.h"
+#include "unistd.h"
+#include "string.h"
+#include "sys/socket.h"
+#include "sys/types.h"
+#include "netinet/in.h"
+#include "arpa/inet.h"
 #include "errno.h"
+#include "error.h"
 #include "syslog.h"
-#include <signal.h>
-#include <unistd.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <arpa/inet.h>
+#include "signal.h"
 
-
-#define CHUNK_SIZE 1024
 #define BUFFER_SIZE 1024
-static volatile int keepRunning = 1;
-static volatile int sockfd;
-const char *filename = "/var/tmp/aesdsocketdata";
+#define OFN "/var/tmp/aesdsocketdata"
 
 
-void intHandler(int dummy) {
-    keepRunning = 0;
-    syslog(LOG_INFO, "Caught signal, exiting");
-    fprintf(stderr, "exit signal received");
-    remove(filename);
-    shutdown(sockfd, SHUT_RDWR);
+struct client_t {
+    struct sockaddr_in addr;
+    int addr_len;
+    int sd;
+};
+
+
+int server;
+volatile int run;
+
+void sd_handler(int sig)
+{
+    if(sig == SIGINT || sig == SIGTERM)
+    {
+        syslog(LOG_INFO, "Caught signal, exiting");
+        run = 0;
+        shutdown(server, SHUT_RDWR);
+    }
 }
 
-// port 9000
-// logging : syslog
-// /var/tmp/aesdsocketdata
-// signal handling : SIGINT or SIGTERM
-// -d daemon fork modification
-
-int main(int argc, char *argv[]){
-    // logs in /var/log/syslog
-    openlog(NULL, 0, LOG_USER);
-    signal(SIGINT, intHandler);
-    signal(SIGTERM, intHandler);
-
-    int fd, run;
+int main(int argc, char **argv)
+{
+    struct sockaddr_in sa;
+    struct client_t c;
+    char buffer[BUFFER_SIZE];
+    size_t len;
+    int recv_len;
     FILE *file;
-    char buffer[BUFFER_SIZE] = { 0 };
+    int daemon = 0;
+    int opt;
 
-    // server code (parent)
-    struct addrinfo hints;
-    struct addrinfo *servinfo;  // will point to the results
-    socklen_t addrlen = sizeof(struct sockaddr);
-    struct sockaddr_storage client_addr;  // To store the client's address
-    char client_ip[INET_ADDRSTRLEN];      // Buffer for storing client IP address
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;    
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;     
-
-    int status = getaddrinfo(NULL, "9000", &hints, &servinfo);
-    if (status != 0) {
-        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
-        exit(EXIT_FAILURE);
-    }
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if(sockfd < 0){
-        fprintf(stderr, "error in socket");
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-    
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run)) < 0) {
-        syslog(LOG_ERR, "setsockopt() error: %d (%s)\n", errno, strerror(errno));
-        fprintf(stderr, "error in socket");
-        perror("socket failed");
-    }
-
-    if(bind(sockfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0){
-        fprintf(stderr, "error in bind");
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if(listen(sockfd, 5) < 0){
-        fprintf(stderr, "error in listen");
-        perror("listen failed");
-        exit(EXIT_FAILURE);
-    }
-
-    int run_daemon = 0;
-    if (argc > 1) {
-        fprintf(stderr, "Entered: %s argument\n", argv[1]);
-        if(argv[1][0] == '-' && argv[1][1] == 'd'){
-            fprintf(stderr, "Running in daemon mode\n");
-            run_daemon = 1;
+    while((opt = getopt(argc, argv, "d")) != -1)
+    {
+        switch(opt)
+        {
+            case 'd':
+                daemon = 1;
+                break;
         }
     }
 
-    // start of loop
-    while (keepRunning) { 
-        if(run_daemon){
-            pid_t pid = fork();
-            if (pid < 0) {
-                fprintf(stderr, "error in fork");
-                perror("fork failed");
-                exit(EXIT_FAILURE);
-            }
-            else if (pid != 0) {
-                fprintf(stderr, "running in daemon mode");
-            }
-        }
+    run = 1;
+    signal(SIGINT, sd_handler);
+    signal(SIGTERM, sd_handler);
+    openlog("aesdsocket", LOG_PID | LOG_CONS, LOG_USER); 
+    server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server < 0)
+    {
+        syslog(LOG_ERR, "[ERROR %d] %s\n", errno, strerror(errno));
+        return -1;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_addr.s_addr = INADDR_ANY;
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(9000);
+    if(setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run)) < 0)
+    {
+        goto return_error;
+    }
+    if(bind(server, (struct sockaddr*)&sa, sizeof(sa)) < 0)
+    {
+        goto return_error;
+    }
+    if(listen(server, 5) < 0 )
+    {
+        goto return_error;
+    }
 
-        fd = accept(sockfd, (struct sockaddr *)&client_addr, &addrlen);
-        if(fd < 0){
-            fprintf(stderr, "error in accept");
-            perror("accept failed");
-            exit(EXIT_FAILURE);
-        }
-        else{
-            // Get the client IP address
-            struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
-            inet_ntop(AF_INET, &(addr_in->sin_addr), client_ip, INET_ADDRSTRLEN);
-            syslog(LOG_DEBUG, "Accepted connection from %s", client_ip);
-        }
-
-        file = fopen(filename, "a+");
-        if(file == NULL){
-            fprintf(stderr, "errno for %s is %d:", filename, errno);
-            syslog(LOG_ERR, "mylog: cannot open file: %s", filename);
-            exit(EXIT_FAILURE);
-        }
-
-        while(1){
-            memset(buffer, 0, BUFFER_SIZE);
-            int valread = recv(fd, buffer, BUFFER_SIZE - 1, 0);
-            if(valread < 0)
+    while(run)
+    {
+        if(daemon)
+        {
+            daemon = fork();
+            if(daemon == -1)
+                goto return_error;
+            else if(daemon != 0)
             {
-                close(fd);
-                fprintf(stderr, "error in recv");
-                perror("recv failed");
-                exit(EXIT_FAILURE);
+                syslog(LOG_INFO, "running daemonized");
+                return 0;
             }
-            else if(valread == 0)
+        }
+        syslog(LOG_INFO, "waiting for connections on port %hd", ntohs(sa.sin_port));
+        memset(&c, 0, sizeof(struct client_t));
+        c.sd = accept(server, (struct sockaddr*)&c.addr, &c.addr_len);
+        if(c.sd < 0)
+        {
+            if(errno == EINTR || errno == EINVAL)
             {
-                // client terminated connection
+                syslog(LOG_INFO, "Shutting down\n");
                 break;
             }
-
-            fputs(buffer, file);
-            fprintf(stderr, "buffer is %s\n", buffer);
-
-            if(valread < BUFFER_SIZE && buffer[valread-1] == '\n')
+            goto return_error;
+        }
+        syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(c.addr.sin_addr));
+        
+        file = fopen(OFN, "a");
+        while(1)
+        {
+            memset(buffer, 0, BUFFER_SIZE);
+            recv_len = recv(c.sd, buffer, BUFFER_SIZE-1, 0);
+            if(recv_len < 0)
             {
-                file = freopen(filename, "r", file);
+                close(c.sd);
+                goto return_error;
+            }
+            else if(recv_len == 0)
+            {
+                //client terminated connection
+                break;
+            }
+            fputs(buffer, file);
+            if(recv_len < BUFFER_SIZE && buffer[recv_len-1] == '\n')
+            {
+                file = freopen(OFN, "r", file);
                 while(fgets(buffer, BUFFER_SIZE, file) != 0)
                 {
-                    send(fd, buffer, strlen(buffer), 0);
+                    send(c.sd, buffer, strlen(buffer), 0);
                 }
                 break;
             }
         }
-
-        close(fd);
-        syslog(LOG_INFO, "Closed connection from %s\n", client_ip);
+        
+        close(c.sd);
+        syslog(LOG_INFO, "Closed connection from %s\n", inet_ntoa(c.addr.sin_addr));
         fclose(file);
     }
 
-    close(sockfd);
+    close(server);
+    remove(OFN);
     closelog();
-    freeaddrinfo(servinfo);
-
-    // Delete the file at the end
-    if (remove(filename) == 0) {
-        fprintf(stderr, "\nFile deleted successfully.\n");
-    } else {
-        fprintf(stderr, "\nError deleting the file.\n");
-    }
-
     return 0;
+
+
+return_error:
+    syslog(LOG_ERR, "[ERROR %d] %s\n", errno, strerror(errno));
+    closelog();
+    close(server);
+    if(c.sd != 0)
+        close(c.sd);
+    return -1;
 }
