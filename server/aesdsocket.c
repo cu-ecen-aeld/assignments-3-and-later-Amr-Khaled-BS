@@ -10,11 +10,15 @@
 #include <netdb.h>
 
 #define CHUNK_SIZE 1024
+#define BUFFER_SIZE 1024
 static volatile int keepRunning = 1;
+static volatile int sockfd;
 
 void intHandler(int dummy) {
     keepRunning = 0;
+    syslog(LOG_INFO, "Caught signal, exiting");
     fprintf(stderr, "exit signal received");
+    shutdown(sockfd, SHUT_RDWR);
 }
 
 // port 9000
@@ -29,17 +33,10 @@ int main(int argc, char *argv[]){
     signal(SIGINT, intHandler);
     signal(SIGTERM, intHandler);
 
-    int fd;
+    int fd, run;
     FILE *file;
     const char *filename = "/var/tmp/aesdsocketdata";
-    char buffer[1024] = { 0 };
-
-    int sockfd = socket(PF_INET, SOCK_STREAM, 0);
-    if(sockfd < 0){
-        fprintf(stderr, "error in socket");
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
+    char buffer[BUFFER_SIZE] = { 0 };
 
     // server code (parent)
     struct addrinfo hints;
@@ -56,22 +53,59 @@ int main(int argc, char *argv[]){
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
         exit(EXIT_FAILURE);
     }
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if(sockfd < 0){
+        fprintf(stderr, "error in socket");
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
     
-    if( bind(sockfd, servinfo->ai_addr, addrlen) < 0){
+    if (setsockopt( sockfd, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run) ) < 0) {
+		syslog( LOG_ERR, "setsockopt() error: %d (%s)\n", errno, strerror( errno ) );
+        fprintf(stderr, "error in socket");
+        perror("socket failed");
+    }
+
+    if( bind(sockfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0){
         fprintf(stderr, "error in bind");
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
     // connect(sockfd, servinfo->ai_addr, sizeof(struct sockaddr));
 
-    if( listen(sockfd, 2) < 0){
+    if( listen(sockfd, 5) < 0){
         fprintf(stderr, "error in listen");
         perror("listen failed");
         exit(EXIT_FAILURE);
     }
 
+    int run_daemon = 0;
+    if (argc > 1) {
+        fprintf(stderr, "Entered: %s argument\n", argv[1]);
+        // syslog(LOG_ERR, "invalid number of arguments");
+        if(argv[1][0] == '-' && argv[1][1] == 'd'){
+            fprintf(stderr, "Running in daemon mode\n");
+            run_daemon = 1;
+        }
+    }
+
     // start of loop
-    // while (keepRunning) { 
+    while (keepRunning) { 
+        if(run_daemon){
+            // int status;
+            pid_t pid = fork();
+            if (pid<0) {
+                fprintf(stderr, "error in fork");
+                perror("fork failed");
+                exit(EXIT_FAILURE);
+            }
+            else if (pid!=0) {
+                // child process
+                fprintf(stderr, "running in daemon mode");
+            }
+        }
+
         fd = accept(sockfd, servinfo->ai_addr, &addrlen);
         if(fd < 0){
             fprintf(stderr, "error in accept");
@@ -82,78 +116,58 @@ int main(int argc, char *argv[]){
             syslog(LOG_DEBUG, "Accepted connection from xxx");
         }
 
-    // while (keepRunning) { 
-        int valread = read(fd, buffer, 1024 - 1); // subtract 1 for the null terminator at the end
-        // int valread = recv(fd, buffer, 1024 - 1, 0); // subtract 1 for the null terminator at the end
-        // fprintf(stderr, "read %d chars\n", valread);
-        fprintf(stderr, "buffer is %s\n", buffer);
-        // send(fd, buffer, strlen(buffer), 0);
-
         file = fopen(filename, "a+");
         if(file == NULL){
             // perror("perror returned");
             fprintf(stderr, "errno for %s is %d:", filename, errno);
             syslog(LOG_ERR, "mylog: cannot open file: %s", filename);
-            return 1;
+            exit(EXIT_FAILURE);
         }
-        else{
-            syslog(LOG_DEBUG, "Writing %s to %s", buffer, filename);
-            fprintf(file, "%s", buffer);
-            fclose(file);
-        }
-    // }
-    // end of loop
 
-    // cleanup
-    file = fopen(filename, "r");
-    if(file == NULL){
-        // perror("perror returned");
-        fprintf(stderr, "errno for %s is %d:", filename, errno);
-        syslog(LOG_ERR, "mylog: cannot open file: %s", filename);
-        return 1;
-    }
-    else{
-        // syslog(LOG_DEBUG, "sending %s to %s", buffer, filename);
-        size_t bytes_read;
-        while ((bytes_read = fread(buffer, 1, CHUNK_SIZE, file)) > 0) {
-            // Send the chunk to the server
-            if (send(fd, buffer, bytes_read, 0) == -1) {
-                printf("Failed to send data.\n");
+        while(1){
+            memset(buffer, 0, BUFFER_SIZE);
+            int valread = recv(fd, buffer, BUFFER_SIZE-1, 0);
+            if(valread < 0)
+            {
+                close(fd);
+                fprintf(stderr, "error in recv");
+                perror("recv failed");
+                exit(EXIT_FAILURE);
+            }
+            else if(valread == 0)
+            {
+                //client terminated connection
+                break;
+            }
+
+            fputs(buffer, file);
+            fprintf(stderr, "buffer is %s\n", buffer);
+
+            if(valread < BUFFER_SIZE && buffer[valread-1] == '\n')
+            {
+                file = freopen(filename, "r", file);
+                while(fgets(buffer, BUFFER_SIZE, file) != 0)
+                {
+                    send(fd, buffer, strlen(buffer), 0);
+                }
+                break;
             }
         }
+
+        close(fd);
+        syslog(LOG_INFO, "Closed connection from XXX\n");
         fclose(file);
     }
 
-    syslog(LOG_DEBUG, "Closed connection from XXX");
-    freeaddrinfo(servinfo);
-    close(fd);
     close(sockfd);
+    closelog();
+    freeaddrinfo(servinfo);
 
     // Delete the file at the end
     if (remove(filename) == 0) {
         fprintf(stderr, "\nFile deleted successfully.\n");
     } else {
         fprintf(stderr, "\nError deleting the file.\n");
-    }
-
-
-    // part daemon
-    fprintf(stderr, "Entered: %d argument\n", argc);
-    if (argc > 1) {
-        fprintf(stderr, "Entered: %s argument\n", argv[1]);
-        // syslog(LOG_ERR, "invalid number of arguments");
-        if(argv[1][0] == '-' && argv[1][1] == 'd'){
-            fprintf(stderr, "Running in daemon mode\n");
-            // int status;
-            pid_t pid = fork();
-            if (pid<0) {
-                return 1;
-            }
-            else if (pid==0) {
-                // child process
-                // return 1;
-            }
-        }
     }
 
     return 0;

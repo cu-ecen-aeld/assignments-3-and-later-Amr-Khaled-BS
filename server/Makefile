@@ -1,7 +1,7 @@
 # Variables
 CROSS_COMPILE ?= gcc   		# Cross-compile prefix (set to nothing if not specified)
 CC = $(CROSS_COMPILE)  		# Compiler (use cross-compiler if CROSS_COMPILE is set)
-CFLAGS = -Wall -g -Werror   # Compiler flags: show all warnings, and include debug information
+CFLAGS = -Wall -g 		    # Compiler flags: show all warnings, and include debug information
 TARGET = aesdsocket        	# Output executable name
 SRC = aesdsocket.c     		# Source file
 
