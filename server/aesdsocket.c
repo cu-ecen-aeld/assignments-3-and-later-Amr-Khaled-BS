@@ -8,16 +8,21 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <arpa/inet.h>
+
 
 #define CHUNK_SIZE 1024
 #define BUFFER_SIZE 1024
 static volatile int keepRunning = 1;
 static volatile int sockfd;
+const char *filename = "/var/tmp/aesdsocketdata";
+
 
 void intHandler(int dummy) {
     keepRunning = 0;
     syslog(LOG_INFO, "Caught signal, exiting");
     fprintf(stderr, "exit signal received");
+    remove(filename);
     shutdown(sockfd, SHUT_RDWR);
 }
 
@@ -35,13 +40,14 @@ int main(int argc, char *argv[]){
 
     int fd, run;
     FILE *file;
-    const char *filename = "/var/tmp/aesdsocketdata";
     char buffer[BUFFER_SIZE] = { 0 };
 
     // server code (parent)
     struct addrinfo hints;
     struct addrinfo *servinfo;  // will point to the results
     socklen_t addrlen = sizeof(struct sockaddr);
+    struct sockaddr_storage client_addr;  // To store the client's address
+    char client_ip[INET_ADDRSTRLEN];      // Buffer for storing client IP address
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;    
@@ -61,20 +67,19 @@ int main(int argc, char *argv[]){
         exit(EXIT_FAILURE);
     }
     
-    if (setsockopt( sockfd, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run) ) < 0) {
-		syslog( LOG_ERR, "setsockopt() error: %d (%s)\n", errno, strerror( errno ) );
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run)) < 0) {
+        syslog(LOG_ERR, "setsockopt() error: %d (%s)\n", errno, strerror(errno));
         fprintf(stderr, "error in socket");
         perror("socket failed");
     }
 
-    if( bind(sockfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0){
+    if(bind(sockfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0){
         fprintf(stderr, "error in bind");
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
-    // connect(sockfd, servinfo->ai_addr, sizeof(struct sockaddr));
 
-    if( listen(sockfd, 5) < 0){
+    if(listen(sockfd, 5) < 0){
         fprintf(stderr, "error in listen");
         perror("listen failed");
         exit(EXIT_FAILURE);
@@ -83,7 +88,6 @@ int main(int argc, char *argv[]){
     int run_daemon = 0;
     if (argc > 1) {
         fprintf(stderr, "Entered: %s argument\n", argv[1]);
-        // syslog(LOG_ERR, "invalid number of arguments");
         if(argv[1][0] == '-' && argv[1][1] == 'd'){
             fprintf(stderr, "Running in daemon mode\n");
             run_daemon = 1;
@@ -93,32 +97,32 @@ int main(int argc, char *argv[]){
     // start of loop
     while (keepRunning) { 
         if(run_daemon){
-            // int status;
             pid_t pid = fork();
-            if (pid<0) {
+            if (pid < 0) {
                 fprintf(stderr, "error in fork");
                 perror("fork failed");
                 exit(EXIT_FAILURE);
             }
-            else if (pid!=0) {
-                // child process
+            else if (pid != 0) {
                 fprintf(stderr, "running in daemon mode");
             }
         }
 
-        fd = accept(sockfd, servinfo->ai_addr, &addrlen);
+        fd = accept(sockfd, (struct sockaddr *)&client_addr, &addrlen);
         if(fd < 0){
             fprintf(stderr, "error in accept");
             perror("accept failed");
             exit(EXIT_FAILURE);
         }
         else{
-            syslog(LOG_DEBUG, "Accepted connection from xxx");
+            // Get the client IP address
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
+            inet_ntop(AF_INET, &(addr_in->sin_addr), client_ip, INET_ADDRSTRLEN);
+            syslog(LOG_DEBUG, "Accepted connection from %s", client_ip);
         }
 
         file = fopen(filename, "a+");
         if(file == NULL){
-            // perror("perror returned");
             fprintf(stderr, "errno for %s is %d:", filename, errno);
             syslog(LOG_ERR, "mylog: cannot open file: %s", filename);
             exit(EXIT_FAILURE);
@@ -126,7 +130,7 @@ int main(int argc, char *argv[]){
 
         while(1){
             memset(buffer, 0, BUFFER_SIZE);
-            int valread = recv(fd, buffer, BUFFER_SIZE-1, 0);
+            int valread = recv(fd, buffer, BUFFER_SIZE - 1, 0);
             if(valread < 0)
             {
                 close(fd);
@@ -136,7 +140,7 @@ int main(int argc, char *argv[]){
             }
             else if(valread == 0)
             {
-                //client terminated connection
+                // client terminated connection
                 break;
             }
 
@@ -155,7 +159,7 @@ int main(int argc, char *argv[]){
         }
 
         close(fd);
-        syslog(LOG_INFO, "Closed connection from XXX\n");
+        syslog(LOG_INFO, "Closed connection from %s\n", client_ip);
         fclose(file);
     }
 
