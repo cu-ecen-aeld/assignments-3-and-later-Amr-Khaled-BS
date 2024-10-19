@@ -10,6 +10,9 @@
 #include "error.h"
 #include "syslog.h"
 #include "signal.h"
+#include <pthread.h>
+#include <time.h>
+#include "queue.h"
 
 #define BUFFER_SIZE 1024
 #define OFN "/var/tmp/aesdsocketdata"
@@ -24,6 +27,71 @@ struct client_t {
 
 int server;
 volatile int run;
+pthread_mutex_t text_file_lock = PTHREAD_MUTEX_INITIALIZER;
+bool is_running = true;
+timer_t timer_id;
+
+//////////////// SLIST
+struct slist_element
+{
+    pthread_t thread_id;
+    bool thread_completed;
+    int socket_fd;
+    int text_fd;
+
+    SLIST_ENTRY(slist_element)
+    slist_elements;
+};
+
+SLIST_HEAD(slist_head, slist_element);
+struct slist_head head;
+
+void close_threads_res()
+{
+    struct slist_element *thread_in_list;
+
+    while (!SLIST_EMPTY(&head))
+    {
+        thread_in_list = SLIST_FIRST(&head);
+
+        thread_in_list->thread_completed = true;
+
+        pthread_join(thread_in_list->thread_id, NULL);
+
+        close(thread_in_list->text_fd);
+        close(thread_in_list->socket_fd);
+
+        SLIST_REMOVE_HEAD(&head, slist_elements);
+        free(thread_in_list);
+    }
+
+    pthread_mutex_destroy(&text_file_lock);
+}
+
+void timer_handler()
+{
+    time_t now;
+    char timestamp[100];
+
+    time(&now);
+    struct tm *time_info = localtime(&now);
+
+    // Format the timestamp according to RFC 2822
+    strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", time_info);
+
+    // Write the timestamp to the file
+    pthread_mutex_lock(&text_file_lock);
+    FILE *file = fopen(FILE_PATH, "a");
+    if (file == NULL)
+    {
+        perror("Failed to open file for timestamp");
+        pthread_mutex_unlock(&text_file_lock);
+        return;
+    }
+    fputs(timestamp, file);
+    fclose(file);
+    pthread_mutex_unlock(&text_file_lock);
+}
 
 void sd_handler(int sig)
 {
@@ -78,6 +146,29 @@ int main(int argc, char **argv)
     {
         goto return_error;
     }
+        
+    struct itimerspec ts = {0};
+    struct sigevent se = {0};
+    /*
+     * Set the sigevent structure to cause the signal to be
+     * delivered by creating a new thread.
+     */
+    se.sigev_notify = SIGEV_THREAD;
+    se.sigev_value.sival_ptr = &timer_id;
+    se.sigev_notify_function = timer_handler;
+    se.sigev_notify_attributes = NULL;
+
+    ts.it_value.tv_sec = 10;
+    ts.it_value.tv_nsec = 0;
+    ts.it_interval.tv_sec = 10;
+    ts.it_interval.tv_nsec = 0;
+
+    if (timer_create(CLOCK_REALTIME, &se, &timer_id) < 0)
+        perror("Create timer");
+
+    if (timer_settime(timer_id, 0, &ts, 0) < 0)
+        perror("Set timer");
+        
     if(listen(server, 5) < 0 )
     {
         goto return_error;
