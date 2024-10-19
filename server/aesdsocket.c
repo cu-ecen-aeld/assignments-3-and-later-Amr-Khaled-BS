@@ -10,23 +10,19 @@
 #include "error.h"
 #include "syslog.h"
 #include "signal.h"
+#include "stdbool.h"
+#include "stdint.h"
+#include "fcntl.h"
+#include "sys/stat.h"
 #include <pthread.h>
 #include <time.h>
 #include "queue.h"
 
-#define BUFFER_SIZE 1024
-#define OFN "/var/tmp/aesdsocketdata"
+#define SERVER_PORT 9000
+#define FILE_PATH "/var/tmp/aesdsocketdata"
+#define BUFFER_SIZE 100
 
-
-struct client_t {
-    struct sockaddr_in addr;
-    int addr_len;
-    int sd;
-};
-
-
-int server;
-volatile int run;
+int server_sockfd = -1;
 pthread_mutex_t text_file_lock = PTHREAD_MUTEX_INITIALIZER;
 bool is_running = true;
 timer_t timer_id;
@@ -68,6 +64,143 @@ void close_threads_res()
     pthread_mutex_destroy(&text_file_lock);
 }
 
+void *handle_connection(void *arg)
+{
+    struct slist_element *element = (struct slist_element *)arg;
+
+    char buffer[BUFFER_SIZE] = {0};
+
+    ssize_t bytes_received = {0};
+
+    element->text_fd = open(FILE_PATH, O_CREAT | O_APPEND | O_RDWR, 0644);
+    if (element->text_fd < 0)
+    {
+        syslog(LOG_ERR, "Error opening file: %s", strerror(errno));
+        return arg;
+    }
+
+    while (is_running && (bytes_received = recv(element->socket_fd, buffer, BUFFER_SIZE - 1, 0)) > 0)
+    {
+        buffer[bytes_received] = '\0';
+
+        char *newline = strchr(buffer, '\n');
+        if (newline)
+        {
+            pthread_mutex_lock(&text_file_lock);
+
+            // Write data up to and including the newline
+            if (write(element->text_fd, buffer, newline - buffer + 1) < 0)
+            {
+                syslog(LOG_ERR, "Error writing to file: %s", strerror(errno));
+            }
+
+            pthread_mutex_unlock(&text_file_lock);
+
+            break; // Exit loop after handling one packet
+        }
+        else
+        {
+            pthread_mutex_lock(&text_file_lock);
+
+            // Write the entire buffer if no newline is found
+            if (write(element->text_fd, buffer, bytes_received) < 0)
+            {
+                syslog(LOG_ERR, "Error writing to file: %s", strerror(errno));
+            }
+
+            pthread_mutex_unlock(&text_file_lock);
+        }
+    }
+
+    if (bytes_received < 0)
+    {
+        syslog(LOG_ERR, "Error receiving data: %s", strerror(errno));
+    }
+
+    // Send the contents of the file back to the client
+    lseek(element->text_fd, 0, SEEK_SET);
+    while (!element->thread_completed && (bytes_received = read(element->text_fd, buffer, BUFFER_SIZE)) > 0)
+    {
+        if (send(element->socket_fd, buffer, bytes_received, 0) < 0)
+        {
+            syslog(LOG_ERR, "Error sending data: %s", strerror(errno));
+            break;
+        }
+    }
+
+    if (element->text_fd != -1)
+    {
+
+        close(element->text_fd);
+    }
+
+    if (element->socket_fd != -1)
+    {
+        close(element->socket_fd);
+    }
+
+    element->thread_completed = true;
+
+    return arg;
+}
+
+void daemonize()
+{
+    pid_t pid;
+
+    // Fork the first time
+    pid = fork();
+
+    if (pid < 0)
+    {
+        syslog(LOG_ERR, "Error forking: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid > 0)
+    {
+        // Parent process exits
+        exit(EXIT_SUCCESS);
+    }
+
+    // Child process continues
+    if (setsid() < 0)
+    {
+        syslog(LOG_ERR, "Error creating new session: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // Fork a second time to ensure the daemon can't acquire a terminal
+    pid = fork();
+
+    if (pid < 0)
+    {
+        syslog(LOG_ERR, "Error forking: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid > 0)
+    {
+        // Parent process exits
+        exit(EXIT_SUCCESS);
+    }
+
+    // Set the file permissions mask to 0
+    umask(0);
+
+    // Change the working directory to root
+    if (chdir("/") < 0)
+    {
+        syslog(LOG_ERR, "Error changing directory to /: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // Close all open file descriptors
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+}
+
 void timer_handler()
 {
     time_t now;
@@ -98,55 +231,87 @@ void sd_handler(int sig)
     if(sig == SIGINT || sig == SIGTERM)
     {
         syslog(LOG_INFO, "Caught signal, exiting");
-        run = 0;
-        shutdown(server, SHUT_RDWR);
+        is_running = false;
     }
 }
 
 int main(int argc, char **argv)
 {
-    struct sockaddr_in sa;
-    struct client_t c;
-    char buffer[BUFFER_SIZE];
-    size_t len;
-    int recv_len;
-    FILE *file;
-    int daemon = 0;
-    int opt;
+    openlog("aesdsocket", LOG_PID, LOG_USER);
 
-    while((opt = getopt(argc, argv, "d")) != -1)
+    SLIST_INIT(&head);
+
+    struct sigaction sa = {0};
+
+    // Register the signal handler for SIGINT and SIGTERM
+    sa.sa_handler = sd_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGINT, &sa, NULL) == -1)
     {
-        switch(opt)
+        syslog(LOG_ERR, "Error registering SIGINT handler: %s", strerror(errno));
+        return -1;
+    }
+
+    if (sigaction(SIGTERM, &sa, NULL) == -1)
+    {
+        syslog(LOG_ERR, "Error registering SIGTERM handler: %s", strerror(errno));
+        return -1;
+    }
+
+    // Remove the file if exists
+    remove(FILE_PATH);
+
+    bool run_as_deamon = false;
+
+    if (argc == 2)
+    {
+        if (strcmp(argv[1], "-d") == 0)
         {
-            case 'd':
-                daemon = 1;
-                break;
+            run_as_deamon = true;
         }
     }
 
-    run = 1;
-    signal(SIGINT, sd_handler);
-    signal(SIGTERM, sd_handler);
-    openlog("aesdsocket", LOG_PID | LOG_CONS, LOG_USER); 
-    server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (server < 0)
+    socklen_t client_len = 0;
+    struct sockaddr_in client_address = {0};
+    struct sockaddr_in server_address = {0};
+
+    server_sockfd = socket(
+        AF_INET,
+        SOCK_STREAM, 0);
+
+    if (server_sockfd == -1)
     {
-        syslog(LOG_ERR, "[ERROR %d] %s\n", errno, strerror(errno));
-        return -1;
+        char *err = strerror(errno);
+        syslog(LOG_ERR, "Error creating server socket: %s", err);
+        exit(EXIT_FAILURE);
     }
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_addr.s_addr = INADDR_ANY;
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(9000);
-    if(setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &run, sizeof(run)) < 0)
+
+    int enable = 1;
+    if (setsockopt(server_sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) < 0)
     {
-        goto return_error;
+        perror("setsockopt(SO_REUSEADDR) failed");
+        exit(EXIT_FAILURE);
     }
-    if(bind(server, (struct sockaddr*)&sa, sizeof(sa)) < 0)
+
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_address.sin_port = htons(SERVER_PORT);
+    if (bind(
+            server_sockfd,
+            (struct sockaddr *)&server_address,
+            sizeof(server_address)) == -1)
     {
-        goto return_error;
+        perror("bind");
+        exit(EXIT_FAILURE);
     }
-        
+
+    if (run_as_deamon)
+    {
+        daemonize();
+    }
+
     struct itimerspec ts = {0};
     struct sigevent se = {0};
     /*
@@ -163,87 +328,49 @@ int main(int argc, char **argv)
     ts.it_interval.tv_sec = 10;
     ts.it_interval.tv_nsec = 0;
 
+    // spawn timestamp logger thread? or timer
     if (timer_create(CLOCK_REALTIME, &se, &timer_id) < 0)
         perror("Create timer");
 
     if (timer_settime(timer_id, 0, &ts, 0) < 0)
         perror("Set timer");
-        
-    if(listen(server, 5) < 0 )
+
+    if (listen(server_sockfd, 5) == -1)
     {
-        goto return_error;
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+    printf("Listening on port %d\n", SERVER_PORT);
+
+    while (is_running)
+    {
+        client_len = sizeof(client_address);
+        int client_sockfd = accept(
+            server_sockfd,
+            (struct sockaddr *)&client_address,
+            &client_len);
+
+        char *client_add = inet_ntoa(client_address.sin_addr);
+        syslog(LOG_DEBUG, "Accepted connection from %s", client_add);
+        printf("server: got connection from %s\n", client_add);
+
+        struct slist_element *thread_element;
+        thread_element = calloc(sizeof(struct slist_element), 1);
+        thread_element->thread_completed = false;
+        thread_element->socket_fd = client_sockfd;
+        thread_element->text_fd = -1;
+        SLIST_INSERT_HEAD(&head, thread_element, slist_elements);
+
+        pthread_create(&thread_element->thread_id, NULL, handle_connection, thread_element);
     }
 
-    while(run)
-    {
-        if(daemon)
-        {
-            daemon = fork();
-            if(daemon == -1)
-                goto return_error;
-            else if(daemon != 0)
-            {
-                syslog(LOG_INFO, "running daemonized");
-                return 0;
-            }
-        }
-        syslog(LOG_INFO, "waiting for connections on port %hd", ntohs(sa.sin_port));
-        memset(&c, 0, sizeof(struct client_t));
-        c.sd = accept(server, (struct sockaddr*)&c.addr, &c.addr_len);
-        if(c.sd < 0)
-        {
-            if(errno == EINTR || errno == EINVAL)
-            {
-                syslog(LOG_INFO, "Shutting down\n");
-                break;
-            }
-            goto return_error;
-        }
-        syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(c.addr.sin_addr));
-        
-        file = fopen(OFN, "a");
-        while(1)
-        {
-            memset(buffer, 0, BUFFER_SIZE);
-            recv_len = recv(c.sd, buffer, BUFFER_SIZE-1, 0);
-            if(recv_len < 0)
-            {
-                close(c.sd);
-                goto return_error;
-            }
-            else if(recv_len == 0)
-            {
-                //client terminated connection
-                break;
-            }
-            fputs(buffer, file);
-            if(recv_len < BUFFER_SIZE && buffer[recv_len-1] == '\n')
-            {
-                file = freopen(OFN, "r", file);
-                while(fgets(buffer, BUFFER_SIZE, file) != 0)
-                {
-                    send(c.sd, buffer, strlen(buffer), 0);
-                }
-                break;
-            }
-        }
-        
-        close(c.sd);
-        syslog(LOG_INFO, "Closed connection from %s\n", inet_ntoa(c.addr.sin_addr));
-        fclose(file);
-    }
+    timer_delete(timer_id);
 
-    close(server);
-    remove(OFN);
+    close_threads_res();
+
+    close(server_sockfd);
+
     closelog();
-    return 0;
 
-
-return_error:
-    syslog(LOG_ERR, "[ERROR %d] %s\n", errno, strerror(errno));
-    closelog();
-    close(server);
-    if(c.sd != 0)
-        close(c.sd);
-    return -1;
+    return EXIT_SUCCESS;
 }
