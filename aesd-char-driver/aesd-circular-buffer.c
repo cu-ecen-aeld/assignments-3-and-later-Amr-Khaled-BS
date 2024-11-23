@@ -32,14 +32,29 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     /**
     * TODO: implement per description
     */
-    int out_loc = buffer->out_offs;
-    int acc_hit = buffer->entry[out_loc].size;
-    while(acc_hit < char_offset){
-        out_loc++;
-        acc_hit += buffer->entry[out_loc].size;
+    size_t acc, count;
+    size_t offset_curr = buffer->out_offs;
+    acc = 0;
+    count = 0;
+
+    if (buffer == NULL) return NULL;
+    while(count < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+    {
+        if(char_offset < acc + buffer->entry[offset_curr].size) 
+        {
+            *entry_offset_byte_rtn = char_offset-acc;
+            return &(buffer->entry[offset_curr]);
+        }
+
+        acc += buffer->entry[offset_curr].size;
+        offset_curr = (offset_curr + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        count++;
+
+        if(offset_curr == buffer->in_offs && !buffer->full){
+            break;
+        }
     }
-    *entry_offset_byte_rtn = char_offset - (acc_hit - buffer->entry[out_loc].size);
-    return &buffer->entry[out_loc];
+    return NULL;
 }
 
 /**
@@ -54,20 +69,13 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     /**
     * TODO: implement per description
     */
-    static int init = 1;
-    buffer->entry[buffer->in_offs] = *add_entry;
-
-    if(buffer->full){
-        buffer->out_offs = (buffer->out_offs == (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED-1)) ? 0 : buffer->out_offs+1;
-    }
-
-    if((buffer->in_offs == buffer->out_offs) && !init)
-    {
-        buffer->full = true;
-    }
-
-    buffer->in_offs = (buffer->in_offs == (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED-1)) ? 0 : buffer->in_offs+1;
-    init = 0;
+    if(buffer->full)
+        buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
+    buffer->entry[buffer->in_offs].size = add_entry->size;
+    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    buffer->full = (buffer->out_offs == buffer->in_offs) ? true : false;
+    return;
 }
 
 /**
