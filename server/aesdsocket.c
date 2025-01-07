@@ -20,6 +20,7 @@
 
 #define SERVER_PORT 9000
 #define USE_AESD_CHAR_DEVICE
+#undef USE_AESD_CHAR_DEVICE
 #ifdef USE_AESD_CHAR_DEVICE
 	#define FILE_PATH "/dev/aesdchar"
 #else
@@ -226,7 +227,7 @@ void timer_handler()
         pthread_mutex_unlock(&text_file_lock);
         return;
     }
-    fputs(timestamp, file);
+    // fputs(timestamp, file);
     fclose(file);
     pthread_mutex_unlock(&text_file_lock);
 }
