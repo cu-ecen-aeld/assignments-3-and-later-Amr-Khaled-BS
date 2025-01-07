@@ -19,7 +19,12 @@
 #include "queue.h"
 
 #define SERVER_PORT 9000
-#define FILE_PATH "/var/tmp/aesdsocketdata"
+#define USE_AESD_CHAR_DEVICE
+#ifdef USE_AESD_CHAR_DEVICE
+	#define FILE_PATH "/dev/aesdchar"
+#else
+	#define FILE_PATH "/var/tmp/aesdsocketdata"
+#endif
 #define BUFFER_SIZE 100
 
 int server_sockfd = -1;
