@@ -32,29 +32,26 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     /**
     * TODO: implement per description
     */
-    size_t acc, count;
-    size_t offset_curr = buffer->out_offs;
-    acc = 0;
-    count = 0;
-
-    if (buffer == NULL) return NULL;
-    while(count < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+    size_t accumulated_byte_count = 0; // Accumulator for the byte count traversed so far
+    size_t i,j;
+    // Loop to traverse the circular buffer entries
+    for(i = buffer->out_offs, j=0 ; ((i != buffer->in_offs) || buffer->full) && (j<10) ; j++)
     {
-        if(char_offset < acc + buffer->entry[offset_curr].size) 
+        // Check if the character offset falls within this buffer entry
+        if((accumulated_byte_count + buffer->entry[i].size) > char_offset)
         {
-            *entry_offset_byte_rtn = char_offset-acc;
-            return &(buffer->entry[offset_curr]);
+            // Calculate the byte offset within this entry and return this entry
+            *entry_offset_byte_rtn = char_offset - accumulated_byte_count;
+            return &buffer->entry[i];
         }
-
-        acc += buffer->entry[offset_curr].size;
-        offset_curr = (offset_curr + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-        count++;
-
-        if(offset_curr == buffer->in_offs && !buffer->full){
-            break;
-        }
+        
+        // Update the accumulated byte count
+        accumulated_byte_count += buffer->entry[i].size;
+        
+        // Circularly increment the index for the next iteration
+        i = (i + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     }
-    return NULL;
+    return NULL; 
 }
 
 /**
@@ -63,19 +60,28 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * new start location.
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
+* @return NULL or, if an existing entry at out_offs was replaced, the value of buffptr for the entry which was replaced (for use with dynamic memory allocation/free)
 */
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    /**
-    * TODO: implement per description
-    */
-    if(buffer->full)
-        buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
-    buffer->entry[buffer->in_offs].size = add_entry->size;
+    // Validate the input parameters; exit if either is NULL
+    if(!add_entry || !buffer) {
+        return;
+    }
+
+    // Add the new entry at the current "in" index
+    buffer->entry[buffer->in_offs] = *add_entry;
+
+    // Increment the "in" index and wrap around if necessary
     buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    buffer->full = (buffer->out_offs == buffer->in_offs) ? true : false;
-    return;
+
+    // If the buffer is full, update the "out" index to the new start
+    if(buffer->full) {
+        buffer->out_offs = buffer->in_offs;
+    }
+
+    // Update the buffer's "full" status flag
+    buffer->full = (buffer->in_offs == buffer->out_offs);
 }
 
 /**
