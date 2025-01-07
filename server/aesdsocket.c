@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <time.h>
 #include "queue.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define SERVER_PORT 9000
 #define USE_AESD_CHAR_DEVICE
@@ -94,10 +95,25 @@ void *handle_connection(void *arg)
         {
             pthread_mutex_lock(&text_file_lock);
 
-            // Write data up to and including the newline
-            if (write(element->text_fd, buffer, newline - buffer + 1) < 0)
+            unsigned int write_cmd;
+            unsigned int offset;
+
+            // Use sscanf to extract the prefix and the integers X and Y
+            if (sscanf(buffer, "AESDCHAR_IOCSEEKTO:%u,%u", &write_cmd, &offset) == 2)
             {
-                syslog(LOG_ERR, "Error writing to file: %s", strerror(errno));
+                struct aesd_seekto seekto;
+                seekto.write_cmd = write_cmd;
+                seekto.write_cmd_offset = offset;
+                ioctl(element->text_fd, AESDCHAR_IOCSEEKTO, &seekto);
+            }
+            else
+            {
+                // Write data up to and including the newline
+                if (write(element->text_fd, buffer, newline - buffer + 1) < 0)
+                {
+                    syslog(LOG_ERR, "Error writing to file: %s", strerror(errno));
+                }
+                lseek(element->text_fd, 0, SEEK_SET);
             }
 
             pthread_mutex_unlock(&text_file_lock);
@@ -124,7 +140,7 @@ void *handle_connection(void *arg)
     }
 
     // Send the contents of the file back to the client
-    lseek(element->text_fd, 0, SEEK_SET);
+    // lseek(element->text_fd, 0, SEEK_SET);
     while (!element->thread_completed && (bytes_received = read(element->text_fd, buffer, BUFFER_SIZE)) > 0)
     {
         if (send(element->socket_fd, buffer, bytes_received, 0) < 0)
@@ -227,7 +243,7 @@ void timer_handler()
         pthread_mutex_unlock(&text_file_lock);
         return;
     }
-    // fputs(timestamp, file);
+    fputs(timestamp, file);
     fclose(file);
     pthread_mutex_unlock(&text_file_lock);
 }
@@ -266,8 +282,10 @@ int main(int argc, char **argv)
         return -1;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     // Remove the file if exists
     remove(FILE_PATH);
+#endif
 
     bool run_as_deamon = false;
 
@@ -318,6 +336,7 @@ int main(int argc, char **argv)
         daemonize();
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     struct itimerspec ts = {0};
     struct sigevent se = {0};
     /*
@@ -340,6 +359,7 @@ int main(int argc, char **argv)
 
     if (timer_settime(timer_id, 0, &ts, 0) < 0)
         perror("Set timer");
+#endif
 
     if (listen(server_sockfd, 5) == -1)
     {
