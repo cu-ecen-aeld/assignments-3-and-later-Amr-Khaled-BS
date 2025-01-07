@@ -243,7 +243,7 @@ void timer_handler()
         pthread_mutex_unlock(&text_file_lock);
         return;
     }
-    fputs(timestamp, file);
+    // fputs(timestamp, file);
     fclose(file);
     pthread_mutex_unlock(&text_file_lock);
 }
