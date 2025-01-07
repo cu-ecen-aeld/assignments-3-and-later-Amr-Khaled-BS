@@ -19,6 +19,8 @@
 #include <linux/slab.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -170,7 +172,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
         if(char_dev->write_buffer == NULL)
         {
             kfree(write_data);
-			//mutex_unlock(&char_dev->lock);
+			mutex_unlock(&char_dev->lock);
             return retval;
         }
     }
@@ -214,6 +216,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 
         // Add the new entry to the circular buffer.
         aesd_circular_buffer_add_entry(&char_dev->buffer, &add_entry);
+        char_dev->buff_size += add_entry.size;
 
         char_dev->write_buffer_size = 0;
     }
@@ -228,8 +231,115 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 
     // Update the file position.
     *f_pos += retval;
-
+    
     return retval;
+}
+
+loff_t aesd_llseek(struct file *file, loff_t offset, int whence)
+{
+	loff_t retval;
+	struct aesd_dev *char_dev = file->private_data;
+
+	// Lock the mutex with interruptible support
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		return -ERESTARTSYS;
+	}
+
+	// Call the fixed_size_llseek function to perform the seek operation
+	retval = fixed_size_llseek(file, offset, whence, char_dev->buff_size);
+	// Check for errors returned by fixed_size_llseek
+	if (retval < 0) {
+		goto unlock;
+	}
+
+    goto unlock;
+
+unlock:
+	// Unlock the mutex before returning (including in case of errors)
+	mutex_unlock(&aesd_device.lock);
+	return retval;
+}
+
+static long aesd_adjust_file_offset(struct file *filp, unsigned int write_cmd, unsigned int write_cmd_offset)
+{
+	long retval = 0;
+	struct aesd_dev *char_dev = filp->private_data;
+	loff_t updated_fpos_offset = 0;
+
+	// Lock the mutex to ensure exclusive access to device data
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		return -ERESTARTSYS;
+	}
+
+	// Check for valid write_cmd
+	if (write_cmd >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+	{
+		retval = -EINVAL;
+		goto unlock;
+	}
+
+	// Check for valid write_cmd_offset
+	if (write_cmd_offset >= char_dev->buffer.entry[write_cmd].size)
+	{
+		retval = -EINVAL;
+		goto unlock;
+	}
+    unsigned int i;
+	// Calculate the updated file position offset
+	for (i = 0; i < write_cmd; i++)
+	{
+		updated_fpos_offset += char_dev->buffer.entry[i].size;
+	}
+
+	// Update the file pointer with the new located offset
+	filp->f_pos = updated_fpos_offset + write_cmd_offset;
+    goto unlock; 
+
+unlock:
+	// Unlock the mutex before returning
+	mutex_unlock(&aesd_device.lock);
+	return retval;	// Return 0 for success or an error code
+}
+
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	long retval = 0;
+
+	// Check if the ioctl command type and number are valid
+	if ((_IOC_TYPE(cmd) != AESD_IOC_MAGIC) || (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR))
+	{
+		retval = -ENOTTY;  // Return code for unsupported ioctl command
+		return retval;
+	}
+
+	struct aesd_seekto seekto;
+
+	switch (cmd)
+	{
+		case AESDCHAR_IOCSEEKTO:
+			// Copy the seekto structure from user space
+			if (copy_from_user(&seekto, (const void __user *)arg, sizeof(seekto)) != 0)
+			{
+				retval = -EFAULT; // Return code for copy_from_user failure
+			}
+			else
+			{
+				// Call aesd_adjust_file_offset to perform the seek operation
+				retval = aesd_adjust_file_offset(filp, seekto.write_cmd, seekto.write_cmd_offset);
+
+				// Check if the seek parameters are out of range
+				if (retval == -EINVAL)
+				{
+				    PDEBUG("Invalid seek parameters\n"); // Additional error handling or logging can be added here if needed
+				}
+			}
+			break;
+
+		default:
+			retval = -ENOTTY; // Return code for unsupported ioctl command
+			break;
+	}
+	return retval;
 }
 
 struct file_operations aesd_fops = {
@@ -237,7 +347,9 @@ struct file_operations aesd_fops = {
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
-    .release =  aesd_release,
+    .release =  aesd_release, 
+    .llseek = aesd_llseek,
+    .unlocked_ioctl = aesd_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)

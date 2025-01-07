@@ -34,6 +34,7 @@ struct aesd_dev
     struct cdev cdev;     /* Char device structure      */
     char *write_buffer; /*Pointer to dynamically allocated buffer for each device*/
     size_t write_buffer_size; /* Amount of data currently stored in buffer*/
+    size_t buff_size;
 };
 
 
