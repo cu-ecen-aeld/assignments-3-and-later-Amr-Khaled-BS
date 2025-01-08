@@ -26,15 +26,14 @@
 
 struct aesd_dev
 {
-    /**
-     * TODO: Add structure(s) and locks needed to complete assignment requirements
-     */
-    struct mutex lock; /* Locking primitive for the driver */
-    struct aesd_circular_buffer buffer;  /*Circular buffer struct*/
-    struct cdev cdev;     /* Char device structure      */
-    char *write_buffer; /*Pointer to dynamically allocated buffer for each device*/
-    size_t write_buffer_size; /* Amount of data currently stored in buffer*/
-    size_t buff_size;
+     /**
+      * TODO: Add structure(s) and locks needed to complete assignment requirements
+      */
+     struct mutex buffer_lock; /* Locking primitive for the driver */
+     struct aesd_circular_buffer circular_buff;  /*Circular buffer struct*/
+     struct cdev cdev;     /* Char device structure      */
+     char *input_buffer; /*Pointer to dynamically allocated buffer for each device*/
+     size_t input_size;
 };
 
 
